@@ -1,126 +1,249 @@
-from flask import Flask, render_template
-import dash
-from dash import html, dcc, dash_table
-import pandas as pd
-import plotly.express as px
-import networkx as nx
-import matplotlib.colors as mcolors
-from itertools import combinations, chain
-import plotly.graph_objects as go
-import re
-from network import plot_communities, get_communities, create_network
-from ast import literal_eval
+from dash import Dash, Input, Output, dash_table, dcc, html
 
-# загрузка данных
-kdf = pd.read_csv("titles_keywords.csv")
-
-# подготовка данных для столбчатых диаграмм
-df = kdf["title"].value_counts().reset_index()[:10]
-analyst = kdf[kdf["title"].str.contains("Аналитик|analyst", flags=re.IGNORECASE)]["title"].reset_index()
-df2 = analyst["title"].value_counts().reset_index()[:10]
-fig = px.bar(df, x="title", y="count", title="Топ-10")
-fig2 = px.bar(df2, x="title", y="count", title="Топ-10")
-
-# подготовка данных для графа
-kdf["keywords"] = kdf["keywords"].apply(literal_eval)
-kdf = kdf[["title", "keywords"]]
-net = create_network(kdf)
-G = nx.Graph()
-G.add_edges_from(net)
-communities, S = get_communities(G)
-fig3 = plot_communities(communities, S)
-
-# подготовка данных для вывода таблицы
-kdf["keywords"] = kdf["keywords"].apply(lambda x: ", ".join(x))
-
-
-# стартовая страница
-server = Flask(__name__)
-
-@server.route('/')
-def index():
-    return render_template("index.html")
-
-
-# страница с исходными данными
-dash_dashboard_app = dash.Dash(
-    __name__,
-    server=server,
-    url_base_pathname='/data/',
-    suppress_callback_exceptions=True
+from dashboard_data import (
+    filter_data,
+    load_data,
+    spatial_heatmap_figure,
+    summary_metrics,
+    table_records,
+    temperature_histogram_figure,
+    type_counts_figure,
+    wind_box_figure,
 )
 
-dash_dashboard_app.layout = html.Div(style={
-    'fontFamily': 'Sans-serif',
-    'textAlign': 'center',
-    'padding': '10px',
-    'backgroundColor': '#f0f8ff'
-}, children=[
-    # заголовок страницы
-    html.H2("Исходные данные"),
 
-    # кнопка назад
-    html.A("Назад", href='/', style={
-        'color': '#28a745',
-        'textDecoration': 'none',
-        'fontSize': '1.1em',
-        'marginBottom': '100px'
-    }),
+DATA = load_data()
+TYPE_OPTIONS = DATA["Тип пожара"].value_counts().index.tolist()
+TEMP_MIN = float(DATA["temperature_c"].min())
+TEMP_MAX = float(DATA["temperature_c"].max())
+PRECIP_MIN = float(DATA["precipitation_mm"].min())
+PRECIP_MAX = float(DATA["precipitation_mm"].max())
 
-    # таблица
-    dash_table.DataTable(
-        data=kdf.to_dict('records'),
-        columns=[{"name": i, "id": i} for i in kdf.columns],
-        style_cell={'textAlign': 'center', 'padding': '1px'},
-        style_header={
-            'backgroundColor': '#28a745',
-            'color': 'white',
-            'fontWeight': 'bold'
-        },
-        style_table={'width': '100%', 'margin': '0 auto', 'marginTop': '10px',}
-    ),
-])
+CARD_STYLE = {
+    "backgroundColor": "white",
+    "border": "1px solid #E2E8F0",
+    "borderRadius": "14px",
+    "boxShadow": "0 6px 18px rgba(15, 23, 42, 0.06)",
+    "padding": "18px",
+    "minWidth": "190px",
+    "flex": "1",
+}
+
+GRAPH_STYLE = {
+    "backgroundColor": "white",
+    "border": "1px solid #E2E8F0",
+    "borderRadius": "14px",
+    "boxShadow": "0 6px 18px rgba(15, 23, 42, 0.05)",
+    "padding": "8px",
+    "minWidth": "420px",
+    "flex": "1",
+}
 
 
-# страница с визуализациями
-dash_dashboard_app = dash.Dash(
-    __name__,
-    server=server,
-    url_base_pathname='/dashboard/',
-    suppress_callback_exceptions=True
+def metric_card(label: str, component_id: str) -> html.Div:
+    return html.Div(
+        [
+            html.Div(label, style={"color": "#64748B", "fontSize": "14px"}),
+            html.Div(
+                id=component_id,
+                style={
+                    "color": "#0F172A",
+                    "fontSize": "30px",
+                    "fontWeight": "700",
+                    "marginTop": "8px",
+                },
+            ),
+        ],
+        style=CARD_STYLE,
+    )
+
+
+app = Dash(__name__, title="Пожары в России — Dash")
+server = app.server
+
+app.layout = html.Div(
+    [
+        html.Div(
+            [
+                html.H1(
+                    "Пожары в России",
+                    style={"margin": "0", "fontSize": "32px", "color": "#0F172A"},
+                ),
+                html.P(
+                    "Интерактивный дашборд по данным FiresRu",
+                    style={"margin": "8px 0 0", "color": "#64748B"},
+                ),
+            ]
+        ),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Label("Тип пожара", style={"fontWeight": "600"}),
+                        dcc.Dropdown(
+                            id="type-filter",
+                            options=[{"label": value, "value": value} for value in TYPE_OPTIONS],
+                            value=TYPE_OPTIONS,
+                            multi=True,
+                            clearable=True,
+                            placeholder="Выберите типы",
+                        ),
+                    ],
+                    style={"flex": "2", "minWidth": "300px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Температура, °C", style={"fontWeight": "600"}),
+                        dcc.RangeSlider(
+                            id="temperature-filter",
+                            min=TEMP_MIN,
+                            max=TEMP_MAX,
+                            step=1,
+                            value=[TEMP_MIN, TEMP_MAX],
+                            tooltip={"placement": "bottom", "always_visible": False},
+                            marks={int(TEMP_MIN): f"{TEMP_MIN:.0f}", 0: "0", 15: "15", int(TEMP_MAX): f"{TEMP_MAX:.0f}"},
+                        ),
+                    ],
+                    style={"flex": "2", "minWidth": "300px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Осадки, мм", style={"fontWeight": "600"}),
+                        dcc.RangeSlider(
+                            id="precipitation-filter",
+                            min=PRECIP_MIN,
+                            max=PRECIP_MAX,
+                            step=0.1,
+                            value=[PRECIP_MIN, PRECIP_MAX],
+                            tooltip={"placement": "bottom", "always_visible": False},
+                            marks={0: "0", 5: "5", 10: "10", 15: "15", 20: "20", 25: "25"},
+                        ),
+                    ],
+                    style={"flex": "2", "minWidth": "300px"},
+                ),
+            ],
+            style={
+                "display": "flex",
+                "gap": "26px",
+                "flexWrap": "wrap",
+                "backgroundColor": "white",
+                "border": "1px solid #E2E8F0",
+                "borderRadius": "14px",
+                "padding": "20px",
+                "marginTop": "22px",
+            },
+        ),
+        html.Div(
+            [
+                metric_card("Наблюдений", "metric-observations"),
+                metric_card("Лесные пожары", "metric-forest-share"),
+                metric_card("Медианная температура", "metric-temperature"),
+                metric_card("Осадки ≤ 0,1 мм", "metric-dry-share"),
+            ],
+            style={"display": "flex", "gap": "14px", "flexWrap": "wrap", "marginTop": "18px"},
+        ),
+        html.Div(
+            [
+                html.Div(dcc.Graph(id="type-chart", config={"displayModeBar": False}), style=GRAPH_STYLE),
+                html.Div(dcc.Graph(id="temperature-chart", config={"displayModeBar": False}), style=GRAPH_STYLE),
+            ],
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginTop": "18px"},
+        ),
+        html.Div(
+            [
+                html.Div(dcc.Graph(id="wind-chart", config={"displayModeBar": False}), style=GRAPH_STYLE),
+                html.Div(dcc.Graph(id="spatial-chart", config={"displayModeBar": False}), style=GRAPH_STYLE),
+            ],
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginTop": "16px"},
+        ),
+        html.Div(
+            [
+                html.H2("Фрагмент отфильтрованных данных", style={"fontSize": "20px"}),
+                html.P(
+                    "Показаны первые 200 строк; фильтры применяются ко всему датасету.",
+                    style={"color": "#64748B"},
+                ),
+                dash_table.DataTable(
+                    id="data-table",
+                    page_size=12,
+                    sort_action="native",
+                    filter_action="native",
+                    style_table={"overflowX": "auto"},
+                    style_cell={
+                        "padding": "9px",
+                        "textAlign": "left",
+                        "fontFamily": "Arial, sans-serif",
+                        "fontSize": "13px",
+                        "minWidth": "110px",
+                    },
+                    style_header={
+                        "backgroundColor": "#0F766E",
+                        "color": "white",
+                        "fontWeight": "700",
+                    },
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#F8FAFC"}
+                    ],
+                ),
+            ],
+            style={
+                "backgroundColor": "white",
+                "border": "1px solid #E2E8F0",
+                "borderRadius": "14px",
+                "padding": "18px",
+                "marginTop": "18px",
+            },
+        ),
+        html.P(
+            "Источник: каталог ИНИД, датасет «Метеорологические условия пожаров на территории России (2021–2022)».",
+            style={"color": "#64748B", "fontSize": "13px", "marginTop": "18px"},
+        ),
+    ],
+    style={
+        "fontFamily": "Arial, sans-serif",
+        "backgroundColor": "#F1F5F9",
+        "minHeight": "100vh",
+        "padding": "28px",
+        "maxWidth": "1500px",
+        "margin": "0 auto",
+    },
 )
 
-dash_dashboard_app.layout = html.Div(style={
-    'fontFamily': 'Sans-serif',
-    'textAlign': 'center',
-    'padding': '10px',
-    'backgroundColor': '#f0f8ff'
-}, children=[
-    # заголовок страницы
-    html.H2("📊 Аналитика данных"),
 
-    # кнопка назад
-    html.A("Назад", href='/', style={
-        'color': '#28a745',
-        'textDecoration': 'none',
-        'fontSize': '1.1em',
-        'marginBottom': '100px'
-    }),
+@app.callback(
+    Output("metric-observations", "children"),
+    Output("metric-forest-share", "children"),
+    Output("metric-temperature", "children"),
+    Output("metric-dry-share", "children"),
+    Output("type-chart", "figure"),
+    Output("temperature-chart", "figure"),
+    Output("wind-chart", "figure"),
+    Output("spatial-chart", "figure"),
+    Output("data-table", "data"),
+    Output("data-table", "columns"),
+    Input("type-filter", "value"),
+    Input("temperature-filter", "value"),
+    Input("precipitation-filter", "value"),
+)
+def update_dashboard(selected_types, temperature_range, precipitation_range):
+    filtered = filter_data(DATA, selected_types, temperature_range, precipitation_range)
+    metrics = summary_metrics(filtered)
+    records = table_records(filtered)
+    columns = [{"name": key, "id": key} for key in records[0]] if records else []
 
-    # графики во вкладках
-    dcc.Tabs([
-        dcc.Tab(label="Самые частые вакансии", children=[
-            dcc.Graph(figure=fig, style={'marginBottom': '0px', 'marginTop': '0px'}),  
-        ]),
-        dcc.Tab(label="Вакансии в области аналитики", children=[
-            dcc.Graph(figure=fig2, style={'marginBottom': '0px', 'marginTop': '0px'}),  
-        ])
-    ], style={'marginTop': '10px', 'fontFamily': 'Sans-serif'}),
+    return (
+        f"{metrics['observations']:,}".replace(",", " "),
+        f"{metrics['forest_share']:.1f}%",
+        f"{metrics['median_temperature']:.1f} °C",
+        f"{metrics['dry_share']:.1f}%",
+        type_counts_figure(filtered),
+        temperature_histogram_figure(filtered),
+        wind_box_figure(filtered),
+        spatial_heatmap_figure(filtered),
+        records,
+        columns,
+    )
 
-    # визуализация графа
-    dcc.Graph(figure=fig3, style={'marginBottom': '10px', 'marginTop': '10px'}),])
 
-
-# запуск приложения
-if __name__ == '__main__':
-    server.run(debug=False)
+if __name__ == "__main__":
+    app.run(debug=False)
